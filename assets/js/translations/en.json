@@ -158,6 +158,7 @@
   "footer_motto": "Play freely, enjoy life.",
   "footer_privacy_badge": "Open Source · No Tracking · No Ads · Privacy First",
   "footer_made_by_prefix": "Made with 🤍 by",
+  // === Rock Paper Scissors ===
 "rps_wins": "Wins",
 "rps_losses": "Losses",
 "rps_draws": "Draws",
@@ -175,6 +176,7 @@
 "game_rps_name": "Rock Paper Scissors",
 "game_rps_desc": "Classic hand gesture game vs AI.",
 
+// === Hangman ===
 "hangman_lives": "Lives",
 "hangman_words": "Words",
 "hangman_category": "Category",
@@ -189,6 +191,7 @@
 "game_hangman_name": "Hangman",
 "game_hangman_desc": "Guess the word before hanging!",
 
+// === Snakes & Ladders ===
 "sl_turn": "Turn",
 "sl_dice": "Dice",
 "sl_wins": "Wins",
@@ -206,6 +209,7 @@
 "game_snakes_name": "Snakes & Ladders",
 "game_snakes_desc": "Race to 100 via ladders, avoid snakes!",
 
+// === Pong ===
 "pong_player1": "Player 1",
 "pong_vs": "VS",
 "pong_start_message": "Press Start to Play!",
@@ -224,6 +228,7 @@
 "game_pong_name": "Pong",
 "game_pong_desc": "Classic arcade ping pong game.",
 
+// === Backgammon ===
 "bg_turn": "Turn",
 "bg_off": "Borne Off",
 "bg_wins": "Wins",
