@@ -1,0 +1,641 @@
+# .github/workflows/update-stable-urls-tablo.yml
+
+name: Update Stable URLs (Tablo)
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '.github/**'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (preview only, no commit)'
+        required: false
+        default: true
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+# ══════════════════════════════════════════
+# CONCURRENCY — Prevent overlapping runs
+# ══════════════════════════════════════════
+concurrency:
+  group: update-stable-urls-tablo
+  cancel-in-progress: false
+
+env:
+  # ─── Beta (source) ───
+  BETA_DOMAIN: 'https://koulaxizis.github.io/tablo-beta'
+  BETA_BASE_HREF: '/tablo-beta/'
+  BETA_REPO_SLUG: 'tablo-beta'
+
+  # ─── Stable (target — custom domain) ───
+  STABLE_DOMAIN: 'https://tablogames.online'
+  STABLE_BASE_HREF: '/'
+  STABLE_REPO_SLUG: 'tablo'
+
+  GH_BOT_NAME: 'github-actions[bot]'
+  GH_BOT_EMAIL: '41898282+github-actions[bot]@users.noreply.github.com'
+
+jobs:
+  update-urls:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      # ──────────────────────────────
+      # 1. CHECKOUT
+      # ──────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      # ──────────────────────────────
+      # 2. GUARD — Skip if auto-commit
+      # ──────────────────────────────
+      - name: Guard — Skip if auto-commit
+        id: guard
+        run: |
+          LAST_COMMIT_MSG=$(git log -1 --pretty=%s)
+          echo "Last commit: $LAST_COMMIT_MSG"
+
+          if [[ "$LAST_COMMIT_MSG" == *"🤖 Auto-update stable URLs (Tablo)"* ]]; then
+            echo "⚠️ Skipping — this is an automated commit"
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ──────────────────────────────
+      # 3. PRE-FLIGHT — Scan for beta references
+      # ──────────────────────────────
+      - name: Pre-flight — Count beta references
+        if: steps.guard.outputs.skip != 'true'
+        id: count-before
+        run: |
+          set -uo pipefail
+
+          PATTERNS=(
+            "/tablo-beta/"
+            "tablo-beta"
+            "koulaxizis.github.io/tablo"
+            "github.com/koulaxizis/tablo-beta"
+            "'beta'"
+            '"beta"'
+            "channel.*beta"
+          )
+
+          TOTAL_FILES=0
+          for pat in "${PATTERNS[@]}"; do
+            COUNT=$(grep -rl "$pat" . \
+              --include='*.html' --include='*.txt' --include='*.xml' \
+              --include='*.json' --include='*.js' --include='*.css' \
+              --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='.github' \
+              2>/dev/null | wc -l || echo 0)
+            echo "  Pattern '$pat' → $COUNT file(s)"
+            TOTAL_FILES=$((TOTAL_FILES + COUNT))
+          done
+
+          echo ""
+          echo "Total affected files: $TOTAL_FILES"
+          echo "total_files=$TOTAL_FILES" >> $GITHUB_OUTPUT
+
+          if [[ $TOTAL_FILES -eq 0 ]]; then
+            echo "ℹ️ No beta references found. Nothing to replace."
+            echo "nothing_to_do=true" >> $GITHUB_OUTPUT
+          else
+            echo "nothing_to_do=false" >> $GITHUB_OUTPUT
+          fi
+
+      # ──────────────────────────────
+      # 4. BACKUP — Create LOCAL snapshot
+      # ──────────────────────────────
+      - name: Backup — Create local snapshot
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true'
+        run: |
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          BRANCH="snapshot-tablo-pre-url-update-$TIMESTAMP"
+          
+          git branch "$BRANCH"
+          
+          echo "✅ Local snapshot branch created: $BRANCH"
+          echo "SNAPSHOT_BRANCH=$BRANCH" >> $GITHUB_ENV
+          
+          # Archive key files
+          tar -czf "snapshot-tablo-backup-$TIMESTAMP.tar.gz" \
+            manifest.json \
+            assets/js/config.js \
+            assets/js/header.js \
+            assets/js/footer.js \
+            assets/js/pwa-install.js \
+            assets/js/translations/*.json \
+            assets/css/style.css \
+            2>/dev/null || true
+          
+          echo "Snapshot archived"
+
+      # ──────────────────────────────
+      # 4b. UPLOAD ARTIFACT
+      # ──────────────────────────────
+      - name: Upload snapshot backup
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: snapshot-tablo-${{ github.run_id }}
+          path: |
+            *.tar.gz
+          retention-days: 7
+
+      # ──────────────────────────────
+      # 5. URL REPLACEMENT (SIMPLIFIED FOR TABLO)
+      # ──────────────────────────────
+      - name: Replace beta URLs with stable URLs
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true'
+        run: |
+          set -euo pipefail
+
+          echo "Replacing beta → stable (Tablo)..."
+          echo "  Domain:    $BETA_DOMAIN → $STABLE_DOMAIN"
+          echo "  Base href: $BETA_BASE_HREF → $STABLE_BASE_HREF"
+          echo "  Repo slug: $BETA_REPO_SLUG → $STABLE_REPO_SLUG"
+          echo ""
+
+          # Gather all relevant files
+          FILES=(
+            "manifest.json"
+            "index.html"
+            "sw.js"
+            "assets/js/config.js"
+            "assets/js/header.js"
+            "assets/js/footer.js"
+            "assets/js/pwa-install.js"
+            "assets/css/style.css"
+          )
+
+          EXTRA_HTML=$(find . -maxdepth 3 -name '*.html' -not -path './.git/*' -type f 2>/dev/null || true)
+          EXTRA_JS=$(find . -maxdepth 4 -name '*.js' -not -path './.git/*' -not -path './node_modules/*' -type f 2>/dev/null || true)
+          EXTRA_CSS=$(find . -maxdepth 4 -name '*.css' -not -path './.git/*' -not -path './node_modules/*' -type f 2>/dev/null || true)
+          EXTRA_JSON=$(find . -maxdepth 4 -name '*.json' -not -path './.git/*' -not -path './node_modules/*' -type f 2>/dev/null || true)
+
+          ALL_FILES=("${FILES[@]}")
+          for f in $EXTRA_HTML $EXTRA_JS $EXTRA_CSS $EXTRA_JSON; do
+            if [[ ! " ${ALL_FILES[*]} " =~ " ${f} " ]]; then
+              ALL_FILES+=("$f")
+            fi
+          done
+
+          REPLACE_COUNT=0
+          for file in "${ALL_FILES[@]}"; do
+            if [[ ! -f "$file" ]]; then
+              continue
+            fi
+
+            CHANGED=0
+
+            # ─── 1: Full HTTPS beta domain → custom domain ───
+            if grep -q "https://koulaxizis\.github\.io/tablo-beta" "$file" 2>/dev/null; then
+              sed -i 's|https://koulaxizis\.github\.io/tablo-beta|https://tablogames.online|g' "$file"
+              CHANGED=1
+            fi
+
+            # ─── 2: Protocol-relative ───
+            if grep -q "//koulaxizis\.github\.io/tablo-beta" "$file" 2>/dev/null; then
+              sed -i 's|//koulaxizis\.github\.io/tablo-beta|//tablogames.online|g' "$file"
+              CHANGED=1
+            fi
+
+            # ─── 3: Bare GH Pages beta ───
+            if grep -q "koulaxizis\.github\.io/tablo-beta" "$file" 2>/dev/null; then
+              sed -i 's|koulaxizis\.github\.io/tablo-beta|tablogames.online|g' "$file"
+              CHANGED=1
+            fi
+
+            # ─── 4: Old stable GH Pages (migration safety) ───
+            if grep -q "https://koulaxizis\.github\.io/tablo/" "$file" 2>/dev/null; then
+              sed -i 's|https://koulaxizis\.github\.io/tablo/|https://tablogames.online/|g' "$file"
+              CHANGED=1
+            fi
+            if grep -q 'https://koulaxizis\.github\.io/tablo"' "$file" 2>/dev/null; then
+              sed -i 's|https://koulaxizis\.github\.io/tablo"|https://tablogames.online"|g' "$file"
+              CHANGED=1
+            fi
+            if grep -q "koulaxizis\.github\.io/tablo" "$file" 2>/dev/null; then
+              sed -i 's|koulaxizis\.github\.io/tablo|tablogames.online|g' "$file"
+              CHANGED=1
+            fi
+
+            # ─── 5: Bare koulaxizis.github.io (preconnect/dns-prefetch catch-all) ───
+            if grep -q "koulaxizis\.github\.io" "$file" 2>/dev/null; then
+              sed -i 's|koulaxizis\.github\.io|tablogames.online|g' "$file"
+              CHANGED=1
+            fi
+
+            # ─── 6: Base href /tablo-beta/ → / ───
+            if grep -q "/tablo-beta/" "$file" 2>/dev/null; then
+              sed -i 's|/tablo-beta/|/|g' "$file"
+              CHANGED=1
+            fi
+
+            # ─── 7: GitHub repo slug ───
+            if grep -q "github\.com/koulaxizis/tablo-beta" "$file" 2>/dev/null; then
+              sed -i 's|github\.com/koulaxizis/tablo-beta|github.com/koulaxizis/tablo|g' "$file"
+              CHANGED=1
+            fi
+
+            # ─── 8: Standalone tablo-beta → tablo (final slug sweep) ───
+            if grep -qE '\btablo-beta\b' "$file" 2>/dev/null; then
+              sed -i 's|tablo-beta|tablo|g' "$file"
+              CHANGED=1
+            fi
+
+            # ─── 9: channel: 'beta' → 'stable' (config.js & similar) ───
+            if grep -q "channel:.*'beta'" "$file" 2>/dev/null; then
+              sed -i "s|channel: 'beta'|channel: 'stable'|g" "$file"
+              CHANGED=1
+            fi
+            if grep -q 'channel:.*"beta"' "$file" 2>/dev/null; then
+              sed -i 's|channel: "beta"|channel: "stable"|g' "$file"
+              CHANGED=1
+            fi
+
+            # ─── 10: Default fallback 'beta' in footer.js ───
+            if grep -q "|| 'beta'" "$file" 2>/dev/null; then
+              sed -i "s||| 'beta'||| 'stable'|g" "$file"
+              CHANGED=1
+            fi
+
+            if [[ $CHANGED -eq 1 ]]; then
+              REPLACE_COUNT=$((REPLACE_COUNT + 1))
+              echo "  ✏️  Updated: $file"
+            fi
+          done
+
+          echo ""
+          echo "Total files modified: $REPLACE_COUNT"
+          echo "REPLACE_COUNT=$REPLACE_COUNT" >> $GITHUB_ENV
+
+      # ──────────────────────────────
+      # 6. POST-FLIGHT — Verify zero beta references
+      # ──────────────────────────────
+      - name: Post-flight — Verify zero beta references
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true'
+        run: |
+          set -euo pipefail
+
+          echo "Scanning for remaining beta references..."
+          echo ""
+
+          FOUND_ISSUES=0
+
+          # ─── Check 1: Beta domain ───
+          DOMAIN_HITS=$(grep -rn "koulaxizis\.github\.io/tablo" . \
+            --include='*.html' --include='*.txt' --include='*.xml' \
+            --include='*.json' --include='*.js' --include='*.css' \
+            --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='.github' \
+            2>/dev/null || true)
+
+          if [[ -n "$DOMAIN_HITS" ]]; then
+            echo "❌ Old domain still found:"
+            echo "$DOMAIN_HITS"
+            FOUND_ISSUES=$((FOUND_ISSUES + 1))
+          else
+            echo "✅ No old domain references"
+          fi
+
+          # ─── Check 2: Bare koulaxizis.github.io ───
+          BARE_HITS=$(grep -rn "koulaxizis\.github\.io" . \
+            --include='*.html' --include='*.txt' --include='*.xml' \
+            --include='*.json' --include='*.js' --include='*.css' \
+            --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='.github' \
+            2>/dev/null || true)
+
+          if [[ -n "$BARE_HITS" ]]; then
+            echo "❌ Bare koulaxizis.github.io still found:"
+            echo "$BARE_HITS"
+            FOUND_ISSUES=$((FOUND_ISSUES + 1))
+          else
+            echo "✅ No bare koulaxizis.github.io references"
+          fi
+
+          # ─── Check 3: tablo-beta slug ───
+          SLUG_HITS=$(grep -rn "tablo-beta" . \
+            --include='*.html' --include='*.txt' --include='*.xml' \
+            --include='*.json' --include='*.js' --include='*.css' \
+            --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='.github' \
+            2>/dev/null || true)
+
+          if [[ -n "$SLUG_HITS" ]]; then
+            echo "❌ tablo-beta slug still found:"
+            echo "$SLUG_HITS"
+            FOUND_ISSUES=$((FOUND_ISSUES + 1))
+          else
+            echo "✅ No tablo-beta slug references"
+          fi
+
+          # ─── Check 4: channel: 'beta' ───
+          CHANNEL_HITS=$(grep -rn "channel.*beta\|channel.*'beta'\||| 'beta'" . \
+            --include='*.js' --include='*.json' \
+            --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='.github' \
+            2>/dev/null || true)
+
+          if [[ -n "$CHANNEL_HITS" ]]; then
+            echo "❌ channel: 'beta' still found:"
+            echo "$CHANNEL_HITS"
+            FOUND_ISSUES=$((FOUND_ISSUES + 1))
+          else
+            echo "✅ No channel: 'beta' references"
+          fi
+
+          # ─── Check 5: Verify new domain if expected ───
+          # (Tablo uses relative paths, so domain may not be present — skip if not found)
+          if grep -rq "tablogames\.online" . \
+            --include='*.html' --include='*.json' --include='*.js' \
+            --exclude-dir='.git' --exclude-dir='node_modules' --exclude-dir='.github' \
+            2>/dev/null; then
+            echo "✅ tablogames.online present (if expected)"
+          else
+            echo "ℹ️ tablogames.online not found — OK for Tablo (uses relative paths)"
+          fi
+
+          echo ""
+          if [[ $FOUND_ISSUES -gt 0 ]]; then
+            echo "❌ VERIFICATION FAILED — $FOUND_ISSUES issue(s) found."
+            git checkout "$SNAPSHOT_BRANCH" -- .
+            exit 1
+          else
+            echo "✅ VERIFICATION PASSED — All beta references replaced."
+          fi
+
+      # ──────────────────────────────
+      # 7. POST-FLIGHT — Validate JSON/JS integrity
+      # ──────────────────────────────
+      - name: Post-flight — Validate JSON and JS integrity
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true'
+        run: |
+          set -euo pipefail
+
+          ERRORS=0
+
+          # ─── JSON files ───
+          for jf in $(find . -maxdepth 4 -name '*.json' -not -path './.git/*' -not -path './node_modules/*' -type f 2>/dev/null); do
+            if python3 -m json.tool "$jf" >/dev/null 2>&1; then
+              echo "✅ $jf — JSON valid"
+            else
+              echo "❌ $jf — JSON invalid"
+              ERRORS=$((ERRORS + 1))
+            fi
+          done
+
+          # ─── JS syntax validation ───
+          JS_FILES=(
+            "assets/js/config.js"
+            "assets/js/header.js"
+            "assets/js/footer.js"
+            "assets/js/pwa-install.js"
+            "sw.js"
+          )
+          for jf in "${JS_FILES[@]}"; do
+            if [[ -f "$jf" ]]; then
+              if node -c "$jf" 2>/dev/null; then
+                echo "✅ $jf — JS syntax OK"
+              else
+                echo "❌ $jf — JS syntax ERROR"
+                ERRORS=$((ERRORS + 1))
+              fi
+            fi
+          done
+
+          echo ""
+          if [[ $ERRORS -gt 0 ]]; then
+            echo "❌ INTEGRITY CHECK FAILED — $ERRORS error(s)."
+            git checkout "$SNAPSHOT_BRANCH" -- .
+            exit 1
+          else
+            echo "✅ INTEGRITY CHECK PASSED."
+          fi
+
+      # ──────────────────────────────
+      # 8. DIFF PREVIEW
+      # ──────────────────────────────
+      - name: Preview — Show diff summary
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true'
+        run: |
+          echo "════════════════════════════════════════"
+          echo "DIFF SUMMARY (Tablo)"
+          echo "════════════════════════════════════════"
+          git diff --stat
+          echo ""
+          echo "Full diff (first 300 lines):"
+          git diff | head -300
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "Modified files: $REPLACE_COUNT"
+          echo "Snapshot: $SNAPSHOT_BRANCH"
+          echo "════════════════════════════════════════"
+
+      # ──────────────────────────────
+      # 9. CONFIGURE GIT
+      # ──────────────────────────────
+      - name: Configure git
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true' &&
+          github.event.inputs.dry_run != 'true'
+        run: |
+          git config user.name "$GH_BOT_NAME"
+          git config user.email "$GH_BOT_EMAIL"
+
+      # ──────────────────────────────
+      # 10. CLEAN INDEX
+      # ──────────────────────────────
+      - name: Clean git index before commit
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true' &&
+          github.event.inputs.dry_run != 'true'
+        run: |
+          echo "Current git status:"
+          git status --short
+          
+          if git diff-index --quiet HEAD --; then
+            echo "ℹ️ Index is clean."
+          else
+            echo "⚠️ Found uncommitted changes. Clearing..."
+            git checkout -- .
+            echo "✅ Index cleared."
+          fi
+
+      # ──────────────────────────────
+      # 11. REDO URL REPLACEMENT
+      # ──────────────────────────────
+      - name: Redo URL replacement (after cleanup)
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true' &&
+          github.event.inputs.dry_run != 'true'
+        run: |
+          set -euo pipefail
+
+          echo "Re-running URL replacements..."
+
+          FILES=(
+            "manifest.json"
+            "index.html"
+            "sw.js"
+            "assets/js/config.js"
+            "assets/js/header.js"
+            "assets/js/footer.js"
+            "assets/js/pwa-install.js"
+            "assets/css/style.css"
+          )
+
+          EXTRA_HTML=$(find . -maxdepth 3 -name '*.html' -not -path './.git/*' -type f 2>/dev/null || true)
+          EXTRA_JS=$(find . -maxdepth 4 -name '*.js' -not -path './.git/*' -not -path './node_modules/*' -type f 2>/dev/null || true)
+          EXTRA_CSS=$(find . -maxdepth 4 -name '*.css' -not -path './.git/*' -not -path './node_modules/*' -type f 2>/dev/null || true)
+          EXTRA_JSON=$(find . -maxdepth 4 -name '*.json' -not -path './.git/*' -not -path './node_modules/*' -type f 2>/dev/null || true)
+
+          ALL_FILES=("${FILES[@]}")
+          for f in $EXTRA_HTML $EXTRA_JS $EXTRA_CSS $EXTRA_JSON; do
+            if [[ ! " ${ALL_FILES[*]} " =~ " ${f} " ]]; then
+              ALL_FILES+=("$f")
+            fi
+          done
+
+          for file in "${ALL_FILES[@]}"; do
+            if [[ ! -f "$file" ]]; then continue; fi
+
+            # 1: Full HTTPS beta domain
+            sed -i 's|https://koulaxizis\.github\.io/tablo-beta|https://tablogames.online|g' "$file" 2>/dev/null || true
+            # 2: Protocol-relative
+            sed -i 's|//koulaxizis\.github\.io/tablo-beta|//tablogames.online|g' "$file" 2>/dev/null || true
+            # 3: Bare GH Pages beta
+            sed -i 's|koulaxizis\.github\.io/tablo-beta|tablogames.online|g' "$file" 2>/dev/null || true
+            # 4: Old stable HTTPS
+            sed -i 's|https://koulaxizis\.github\.io/tablo/|https://tablogames.online/|g' "$file" 2>/dev/null || true
+            sed -i 's|https://koulaxizis\.github\.io/tablo"|https://tablogames.online"|g' "$file" 2>/dev/null || true
+            # 5: Bare old stable
+            sed -i 's|koulaxizis\.github\.io/tablo|tablogames.online|g' "$file" 2>/dev/null || true
+            # 6: Catch-all bare GH Pages
+            sed -i 's|koulaxizis\.github\.io|tablogames.online|g' "$file" 2>/dev/null || true
+            # 7: Base href
+            sed -i 's|/tablo-beta/|/|g' "$file" 2>/dev/null || true
+            # 8: GitHub repo link
+            sed -i 's|github\.com/koulaxizis/tablo-beta|github.com/koulaxizis/tablo|g' "$file" 2>/dev/null || true
+            # 9: Final slug sweep
+            sed -i 's|tablo-beta|tablo|g' "$file" 2>/dev/null || true
+            # 10: channel: 'beta' → 'stable'
+            sed -i "s|channel: 'beta'|channel: 'stable'|g" "$file" 2>/dev/null || true
+            sed -i 's|channel: "beta"|channel: "stable"|g' "$file" 2>/dev/null || true
+            # 11: Default fallback 'beta'
+            sed -i "s||| 'beta'||| 'stable'|g" "$file" 2>/dev/null || true
+          done
+
+          echo "✅ Replacements re-applied."
+
+      # ──────────────────────────────
+      # 12. COMMIT
+      # ──────────────────────────────
+      - name: Commit changes
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true' &&
+          github.event.inputs.dry_run != 'true'
+        run: |
+          set -euo pipefail
+
+          # Stage known files
+          git add \
+            manifest.json index.html sw.js \
+            assets/js/config.js assets/js/header.js assets/js/footer.js \
+            assets/js/pwa-install.js assets/css/style.css
+
+          # Also stage any other changed files
+          git add '*.html' '*.js' '*.json' '*.xml' '*.txt' '*.css' ':!.github' 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "ℹ️ No changes to commit."
+            exit 0
+          fi
+
+          echo "Pulling latest..."
+          git pull --no-edit origin main || {
+            git fetch origin main
+            git merge origin/main --no-edit || {
+              echo "❌ Merge failed. Aborting."
+              exit 1
+            }
+          }
+
+          git commit -m "🤖 Auto-update stable URLs (Tablo)
+
+          Domain:    $BETA_DOMAIN → $STABLE_DOMAIN
+          Base href: $BETA_BASE_HREF → $STABLE_BASE_HREF
+          Repo slug: $BETA_REPO_SLUG → $STABLE_REPO_SLUG
+          Channel:   beta → stable
+          Files modified: $REPLACE_COUNT
+          Snapshot: $SNAPSHOT_BRANCH"
+
+          git push origin main
+
+          echo "✅ Changes committed and pushed."
+
+      # ──────────────────────────────
+      # 13. DRY-RUN NOTICE
+      # ──────────────────────────────
+      - name: Notice — Dry run mode
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do != 'true' &&
+          github.event.inputs.dry_run == 'true'
+        run: |
+          echo "╔══════════════════════════════════════╗"
+          echo "║  🔍 DRY RUN — No changes committed  ║"
+          echo "║  Review the diff above.             ║"
+          echo "║  To apply: re-run with dry_run=false║"
+          echo "╚══════════════════════════════════════╝"
+
+      # ──────────────────────────────
+      # 14. SKIP NOTICES
+      # ──────────────────────────────
+      - name: Notice — Skipped (auto-commit)
+        if: steps.guard.outputs.skip == 'true'
+        run: echo "⏭️ Skipped — automated commit detected."
+
+      - name: Notice — Nothing to replace
+        if: |
+          steps.guard.outputs.skip != 'true' &&
+          steps.count-before.outputs.nothing_to_do == 'true'
+        run: echo "✅ No beta references found. Already on stable."
+
+      # ──────────────────────────────
+      # 15. FAILURE RESTORE
+      # ──────────────────────────────
+      - name: On failure — Restore instructions
+        if: failure()
+        run: |
+          echo "╔══════════════════════════════════════╗"
+          echo "║  ⚠️  WORKFLOW FAILED                 ║"
+          echo "║  Snapshot: $SNAPSHOT_BRANCH         ║"
+          echo "║  Artifact: snapshot-tabo-${{ github.run_id }} ║"
+          echo "╚══════════════════════════════════════╝"
